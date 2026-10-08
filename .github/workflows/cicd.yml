@@ -56,7 +56,9 @@ jobs:
         id: aws
         run: |
           ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
           echo "account_id=$ACCOUNT_ID" >> "$GITHUB_OUTPUT"
+
           echo "ecr_registry=$ACCOUNT_ID.dkr.ecr.${AWS_REGION}.amazonaws.com" >> "$GITHUB_OUTPUT"
 
       - name: Login to Amazon ECR
@@ -69,6 +71,7 @@ jobs:
       - name: Build and push commit-SHA image
         env:
           ECR_REGISTRY: ${{ steps.aws.outputs.ecr_registry }}
+          ECR_REPOSITORY: ${{ env.ECR_REPOSITORY }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
           IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY"
@@ -82,7 +85,7 @@ jobs:
           echo "Image pushed:"
           echo "$IMAGE_URI:$IMAGE_TAG"
 
-           - name: Deploy to EC2 with health check and rollback
+      - name: Deploy to EC2 with health check and rollback
         env:
           ECR_REGISTRY: ${{ steps.aws.outputs.ecr_registry }}
           ECR_REPOSITORY: ${{ env.ECR_REPOSITORY }}
@@ -93,6 +96,7 @@ jobs:
           DB_USER: ${{ secrets.DB_USERNAME }}
           DB_PASS: ${{ secrets.DB_PASSWORD }}
           DB_NAME: greetings_db
+
         run: |
           python - <<'PY' > /tmp/ssm-command.json
           import json
@@ -178,7 +182,9 @@ jobs:
 
           if docker inspect cloud-cicd-previous >/dev/null 2>&1; then
             docker rename cloud-cicd-previous cloud-cicd-app
+
             docker start cloud-cicd-app
+
             echo "Rollback completed."
           else
             echo "No previous container available for rollback."
@@ -249,6 +255,7 @@ jobs:
 
               echo
               echo "Public application health check passed."
+
               exit 0
             fi
 
@@ -258,4 +265,5 @@ jobs:
           done
 
           echo "Public health check failed."
+
           exit 1
