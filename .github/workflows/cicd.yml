@@ -82,10 +82,11 @@ jobs:
           echo "Image pushed:"
           echo "$IMAGE_URI:$IMAGE_TAG"
 
-      - name: Deploy to EC2 with health check and rollback
+           - name: Deploy to EC2 with health check and rollback
         env:
           ECR_REGISTRY: ${{ steps.aws.outputs.ecr_registry }}
           ECR_REPOSITORY: ${{ env.ECR_REPOSITORY }}
+          IMAGE_URI: ${{ steps.aws.outputs.ecr_registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
           IMAGE_TAG: ${{ github.sha }}
           INSTANCE_ID: ${{ env.EC2_INSTANCE_ID }}
           DB_HOST: ${{ secrets.DB_HOST }}
@@ -93,9 +94,6 @@ jobs:
           DB_PASS: ${{ secrets.DB_PASSWORD }}
           DB_NAME: greetings_db
         run: |
-          IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-	  		export IMAGE_URI
-
           python - <<'PY' > /tmp/ssm-command.json
           import json
           import os
@@ -180,9 +178,7 @@ jobs:
 
           if docker inspect cloud-cicd-previous >/dev/null 2>&1; then
             docker rename cloud-cicd-previous cloud-cicd-app
-
             docker start cloud-cicd-app
-
             echo "Rollback completed."
           else
             echo "No previous container available for rollback."
