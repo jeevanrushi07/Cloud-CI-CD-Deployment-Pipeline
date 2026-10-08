@@ -94,7 +94,7 @@ jobs:
           DB_NAME: greetings_db
         run: |
           IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-	  export IMAGE_URI
+	  		export IMAGE_URI
 
           python - <<'PY' > /tmp/ssm-command.json
           import json
