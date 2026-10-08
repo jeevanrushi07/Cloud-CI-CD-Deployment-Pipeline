@@ -1,0 +1,4 @@
+region       = "ca-central-1"
+admin_cidr   = "YOUR.PUBLIC.IP.ADDRESS/32"
+domain_name  = "app.example.com"
+# db_username and db_password should be supplied through GitHub Actions secrets / TF_VAR_*.

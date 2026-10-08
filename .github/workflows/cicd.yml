@@ -1,0 +1,194 @@
+name: Cloud CI/CD Deployment Pipeline
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: ca-central-1
+  ECR_REPOSITORY: cloud-cicd-greeting-app
+
+jobs:
+  test:
+    name: CI - Test and Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Python syntax check
+        run: python -m py_compile app.py
+
+      - name: Docker build test
+        run: docker build -t ci-test-image .
+
+  deploy:
+    name: CD - Terraform + ECR + EC2
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Bootstrap Terraform state bucket
+        id: state
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          BUCKET="cloud-cicd-terraform-state-$ACCOUNT_ID"
+          if ! aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
+            aws s3api create-bucket \
+              --bucket "$BUCKET" \
+              --region "$AWS_REGION" \
+              --create-bucket-configuration LocationConstraint="$AWS_REGION"
+          fi
+          aws s3api put-bucket-versioning --bucket "$BUCKET" --versioning-configuration Status=Enabled
+          aws s3api put-bucket-encryption --bucket "$BUCKET" --server-side-encryption-configuration \
+            '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+          echo "bucket=$BUCKET" >> "$GITHUB_OUTPUT"
+
+      - name: Terraform init
+        working-directory: terraform
+        run: terraform init -reconfigure -backend-config="bucket=${{ steps.state.outputs.bucket }}" -backend-config="key=cloud-cicd/terraform.tfstate" -backend-config="region=$AWS_REGION"
+
+      - name: Terraform validate
+        working-directory: terraform
+        run: terraform validate
+
+      - name: Terraform plan
+        working-directory: terraform
+        env:
+          TF_VAR_db_username: ${{ secrets.DB_USERNAME }}
+          TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
+          TF_VAR_admin_cidr: ${{ secrets.ADMIN_CIDR }}
+          TF_VAR_domain_name: ${{ secrets.DOMAIN_NAME }}
+        run: terraform plan -out=tfplan
+
+      - name: Terraform apply
+        working-directory: terraform
+        env:
+          TF_VAR_db_username: ${{ secrets.DB_USERNAME }}
+          TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
+          TF_VAR_admin_cidr: ${{ secrets.ADMIN_CIDR }}
+          TF_VAR_domain_name: ${{ secrets.DOMAIN_NAME }}
+        run: terraform apply -auto-approve tfplan
+
+      - name: Read Terraform outputs
+        id: tf
+        working-directory: terraform
+        run: |
+          echo "ecr_repo=$(terraform output -raw ecr_repo_url)" >> "$GITHUB_OUTPUT"
+          echo "instance_id=$(terraform output -raw ec2_instance_id)" >> "$GITHUB_OUTPUT"
+          echo "db_host=$(terraform output -raw db_endpoint)" >> "$GITHUB_OUTPUT"
+          echo "domain=$(terraform output -raw https_url)" >> "$GITHUB_OUTPUT"
+
+      - name: Login to Amazon ECR
+        run: |
+          aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "${{ steps.tf.outputs.ecr_repo }}"
+
+      - name: Build and push commit-SHA image
+        env:
+          IMAGE_URI: ${{ steps.tf.outputs.ecr_repo }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t "$IMAGE_URI:$IMAGE_TAG" .
+          docker push "$IMAGE_URI:$IMAGE_TAG"
+
+      - name: Deploy with health check and automatic rollback
+        env:
+          IMAGE_URI: ${{ steps.tf.outputs.ecr_repo }}
+          INSTANCE_ID: ${{ steps.tf.outputs.instance_id }}
+          DB_HOST: ${{ steps.tf.outputs.db_host }}
+          DB_USER: ${{ secrets.DB_USERNAME }}
+          DB_PASS: ${{ secrets.DB_PASSWORD }}
+          DB_NAME: greetings_db
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          python - <<'PY' > /tmp/deploy.json
+          import json, os
+          script = f'''set -e
+          IMAGE_URI="{os.environ['IMAGE_URI']}"
+          IMAGE_TAG="{os.environ['IMAGE_TAG']}"
+          DB_HOST="{os.environ['DB_HOST']}"
+          DB_USER="{os.environ['DB_USER']}"
+          DB_PASS="{os.environ['DB_PASS']}"
+          DB_NAME="{os.environ['DB_NAME']}"
+          aws ecr get-login-password --region {os.environ['AWS_REGION']} | docker login --username AWS --password-stdin "$IMAGE_URI"
+          docker pull "$IMAGE_URI:$IMAGE_TAG"
+
+          if docker inspect cloud-cicd-app >/dev/null 2>&1; then
+            docker rm -f cloud-cicd-previous >/dev/null 2>&1 || true
+            docker rename cloud-cicd-app cloud-cicd-previous
+          fi
+
+          docker run -d --restart unless-stopped --name cloud-cicd-app -p 5000:5000 \\
+            -e DB_HOST="$DB_HOST" -e DB_NAME="$DB_NAME" -e DB_USER="$DB_USER" -e DB_PASS="$DB_PASS" \\
+            "$IMAGE_URI:$IMAGE_TAG"
+
+          HEALTHY=0
+          for i in $(seq 1 18); do
+            if curl --fail --silent http://127.0.0.1:5000/healthz >/dev/null; then HEALTHY=1; break; fi
+            sleep 5
+          done
+
+          if [ "$HEALTHY" -eq 1 ]; then
+            docker rm -f cloud-cicd-previous >/dev/null 2>&1 || true
+            echo "Deployment healthy: $IMAGE_TAG"
+            exit 0
+          fi
+
+          echo "New release failed health check. Rolling back."
+          docker rm -f cloud-cicd-app >/dev/null 2>&1 || true
+          if docker inspect cloud-cicd-previous >/dev/null 2>&1; then
+            docker rename cloud-cicd-previous cloud-cicd-app
+            docker start cloud-cicd-app
+          fi
+          exit 1
+          '''
+          print(json.dumps({"commands": script.splitlines()}))
+          PY
+
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters file:///tmp/deploy.json \
+            --query 'Command.CommandId' --output text)
+
+          echo "SSM deployment command: $COMMAND_ID"
+          aws ssm wait command-executed --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID"
+
+          STATUS=$(aws ssm get-command-invocation --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" --query Status --output text)
+          aws ssm get-command-invocation --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" --query StandardOutputContent --output text
+          aws ssm get-command-invocation --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" --query StandardErrorContent --output text
+          test "$STATUS" = "Success"
+
+      - name: HTTPS smoke test
+        env:
+          APP_URL: ${{ steps.tf.outputs.domain }}
+        run: |
+          for i in {1..12}; do
+            if curl --fail --silent --show-error --max-time 15 "$APP_URL/healthz"; then
+              echo "HTTPS application health check passed."
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "HTTPS health check failed."
+          exit 1
