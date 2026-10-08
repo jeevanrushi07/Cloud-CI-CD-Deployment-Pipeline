@@ -89,6 +89,7 @@ def show_usernames():
 
 @app.route('/healthz')
 def healthz():
+    return {'status': 'broken'}, 500
     try:
         conn = get_db_connection()
         cur = conn.cursor()
