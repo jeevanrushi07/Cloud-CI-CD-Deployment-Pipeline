@@ -96,6 +96,12 @@ jobs:
           DB_USER: ${{ secrets.DB_USERNAME }}
           DB_PASS: ${{ secrets.DB_PASSWORD }}
           DB_NAME: greetings_db
+<<<<<<< Updated upstream
+=======
+        run: |
+          IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+		export IMAGE_URI
+>>>>>>> Stashed changes
 
         run: |
           python - <<'PY' > /tmp/ssm-command.json
@@ -133,12 +139,13 @@ jobs:
           docker pull "$IMAGE_URI"
 
           if docker inspect cloud-cicd-app >/dev/null 2>&1; then
-            echo "Saving current container for rollback..."
+  		echo "Saving current container for rollback..."
 
-            docker rm -f cloud-cicd-previous >/dev/null 2>&1 || true
+ 		docker rm -f cloud-cicd-previous >/dev/null 2>&1 || true
 
-            docker rename cloud-cicd-app cloud-cicd-previous
-          fi
+  		docker stop cloud-cicd-app
+  		docker rename cloud-cicd-app cloud-cicd-previous
+	   fi
 
           echo "Starting new container..."
 
