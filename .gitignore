@@ -1,0 +1,16 @@
+terraform.tfvars
+*.tfstate
+*.tfstate.*
+.terraform/
+.env
+__pycache__/
+*.pyc
+
+
+
+# Secrets and local AWS files
+*.csv
+
+# Local deployment/debug files
+terraform/ssm-command.json
+ec2-console.txt

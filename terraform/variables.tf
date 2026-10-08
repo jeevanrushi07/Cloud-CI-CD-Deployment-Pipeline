@@ -1,7 +1,7 @@
 variable "region" {
   description = "AWS region"
   type        = string
-  default     = "ca-central-1"
+  default     = "ap-south-1"
 }
 
 variable "db_username" {

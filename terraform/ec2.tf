@@ -26,21 +26,16 @@ resource "aws_security_group" "ec2_sg" {
     cidr_blocks = [var.admin_cidr]
   }
 
-  ingress {
-    description = "HTTP for ACME certificate validation and redirect"
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
 
   ingress {
-    description = "HTTPS through Caddy"
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+  description = "Flask application"
+  from_port   = 5000
+  to_port     = 5000
+  protocol    = "tcp"
+  cidr_blocks = ["0.0.0.0/0"]
+}
+
+
 
   egress {
     from_port   = 0
@@ -95,36 +90,24 @@ resource "aws_eip" "app" {
 
 resource "aws_instance" "flask_ec2" {
   ami                         = data.aws_ami.amazon_linux.id
-  instance_type               = "t2.micro"
+  instance_type               = "t3.micro"
   subnet_id                   = module.vpc.public_subnets[0]
   vpc_security_group_ids      = [aws_security_group.ec2_sg.id]
   iam_instance_profile        = aws_iam_instance_profile.ec2_profile.name
   associate_public_ip_address = false
 
-  user_data = <<-EOF
-              #!/bin/bash
-              set -eux
-              dnf update -y
-              dnf install -y docker awscli-2 curl
-              systemctl enable --now docker
-              systemctl enable --now amazon-ssm-agent || true
-              usermod -aG docker ec2-user || true
+user_data = <<-EOF
+            #!/bin/bash
+            set -eux
 
-              mkdir -p /opt/cloud-cicd/caddy-data /opt/cloud-cicd/caddy-config
-              printf '%s\n' \
-                '${var.domain_name} {' \
-                '  encode gzip' \
-                '  reverse_proxy 127.0.0.1:5000' \
-                '}' > /opt/cloud-cicd/Caddyfile
-              docker pull caddy:2-alpine
-              docker rm -f cloud-cicd-caddy || true
-              docker run -d --restart unless-stopped --name cloud-cicd-caddy \
-                --network host \
-                -v /opt/cloud-cicd/Caddyfile:/etc/caddy/Caddyfile:ro \
-                -v /opt/cloud-cicd/caddy-data:/data \
-                -v /opt/cloud-cicd/caddy-config:/config \
-                caddy:2-alpine
-              EOF
+            dnf update -y
+            dnf install -y docker awscli-2 amazon-ssm-agent
+
+            systemctl enable --now docker
+            systemctl enable --now amazon-ssm-agent
+
+            usermod -aG docker ec2-user || true
+            EOF
 
   tags = {
     Name    = "Cloud-CICD-EC2"
@@ -135,10 +118,4 @@ resource "aws_instance" "flask_ec2" {
 resource "aws_eip_association" "app" {
   instance_id   = aws_instance.flask_ec2.id
   allocation_id = aws_eip.app.id
-}
-
-resource "aws_ssm_parameter" "domain" {
-  name  = "/cloud-cicd/domain"
-  type  = "String"
-  value = var.domain_name
 }
